@@ -235,9 +235,7 @@ class BSFS:
         self._initialized = False
         
         # Convert master key to C array
-        key_array = (c_uint8 * 32)()
-        for i, byte in enumerate(master_key):
-            key_array[i] = byte
+        key_array = (c_uint8 * 32).from_buffer_copy(master_key)
         
         # Initialize tenant
         blob_path_bytes = str(self.blob_path).encode('utf-8')
@@ -274,11 +272,7 @@ class BSFS:
     
     def _uuid_to_c_array(self, file_id: uuid.UUID) -> ctypes.Array:
         """Convert Python UUID to C uint8 array"""
-        uuid_bytes = file_id.bytes
-        uuid_array = (c_uint8 * 16)()
-        for i, byte in enumerate(uuid_bytes):
-            uuid_array[i] = byte
-        return uuid_array
+        return (c_uint8 * 16).from_buffer_copy(file_id.bytes)
     
     def _check_initialized(self):
         """Check if BSFS is initialized"""
