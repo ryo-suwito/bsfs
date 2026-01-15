@@ -20,9 +20,29 @@ class BSFS_FileEntry(Structure):
         ("blocks", BSFS_BlockRef * 256)
     ]
 
-# Opaque pointer for bsfs_tenant_t
+# Define full BSFS_Tenant structure to match C definition
+class BSFS_Partition(Structure):
+    # We don't pack this one as it's not packed in C
+    _fields_ = [
+        ("partition_id", c_uint8),
+        # Padding might be added by compiler here
+        ("blob_file", POINTER(c_int)), # FILE*
+        ("partition_offset", c_size_t), # uint64_t
+        ("block_size", c_uint8 * 4), # uint32_t
+        ("encryption_key", c_uint8 * 32),
+        ("bat", POINTER(c_uint8)), # bsfs_bat_t*
+        ("bat_dirty", c_int)
+    ]
+
 class BSFS_Tenant(Structure):
-    pass
+    # We don't pack this one as it's not packed in C
+    _fields_ = [
+        ("blob_path", c_char_p),
+        ("blob_file", POINTER(c_int)), # FILE*
+        ("master_key", c_uint8 * 32),
+        ("partitions", BSFS_Partition * 256),
+        ("partition_count", c_int)
+    ]
 
 class BSFS:
     def __init__(self, lib_path="./libbsfs.so", blob_path="test_python.blob", master_key=b'x'*32):
