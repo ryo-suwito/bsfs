@@ -239,9 +239,7 @@ class BSFS:
         self._initialized = False
         
         # Convert master key to C array
-        key_array = (c_uint8 * 32)()
-        for i, byte in enumerate(master_key):
-            key_array[i] = byte
+        key_array = (c_uint8 * 32).from_buffer_copy(master_key)
         
         # Initialize tenant
         blob_path_bytes = str(self.blob_path).encode('utf-8')
