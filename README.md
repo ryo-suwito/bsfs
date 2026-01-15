@@ -144,9 +144,9 @@ All tests pass successfully with the current implementation.
 ## Development Roadmap
 
 ### High Priority
-- **Multi-partition support** - Extend beyond single partition for larger storage
-- **Error recovery** - BAT corruption detection and recovery mechanisms
-- **Python wrapper** - ctypes-based bindings for easy Python integration
+- **[Completed] Multi-partition support** - Extend beyond single partition for larger storage
+- **[Completed] Error recovery** - BAT corruption detection and recovery mechanisms (SHA256 checksums)
+- **[Completed] Python wrapper** - ctypes-based bindings for easy Python integration
 
 ### Medium Priority
 - **Increased file limits** - Expand from 64 to 1024+ files per partition

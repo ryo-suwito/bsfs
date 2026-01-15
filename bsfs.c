@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 
 #define _GNU_SOURCE
 
@@ -154,6 +155,37 @@ int bsfs_decrypt_bat(const uint8_t *encrypted_data, size_t encrypted_size, const
     return 0;
 }
 
+static int bsfs_compute_checksum(const bsfs_bat_t *bat, uint8_t *checksum) {
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return -1;
+
+    if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    // Hash everything before padding
+    if (EVP_DigestUpdate(mdctx, bat, sizeof(bsfs_bat_header_t) + sizeof(bsfs_file_entry_t) * 64 + sizeof(uint16_t) * BSFS_BLOCKS_PER_PARTITION) != 1) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    // Hash padding starting after checksum (32 bytes)
+    if (EVP_DigestUpdate(mdctx, bat->padding + 32, sizeof(bat->padding) - 32) != 1) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    unsigned int len;
+    if (EVP_DigestFinal_ex(mdctx, checksum, &len) != 1) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    EVP_MD_CTX_free(mdctx);
+    return 0;
+}
+
 // Fisher-Yates shuffle for free blocks
 static void shuffle_free_blocks(uint16_t *blocks, uint16_t count) {
     for (uint16_t i = count - 1; i > 0; i--) {
@@ -234,13 +266,22 @@ int bsfs_tenant_init(bsfs_tenant_t *tenant, const char *blob_path, const uint8_t
         }
     }
     
-    // Initialize first partition
-    if (bsfs_partition_init(tenant, 0) != 0) {
-        fclose(tenant->blob_file);
-        free(tenant->blob_path);
-        return -1;
+    // Determine number of partitions from file size
+    fseek(tenant->blob_file, 0, SEEK_END);
+    long file_size = ftell(tenant->blob_file);
+
+    uint64_t partition_size = (uint64_t)BSFS_BLOCKS_PER_PARTITION * BSFS_BLOCK_SIZE_DEFAULT + sizeof(bsfs_bat_t) + 4096;
+    int num_partitions = (file_size + partition_size - 1) / partition_size;
+    if (num_partitions == 0) num_partitions = 1; // Always at least one
+
+    // Initialize/Load partitions
+    for (int i = 0; i < num_partitions; i++) {
+        if (bsfs_partition_init(tenant, i) != 0) {
+            bsfs_tenant_cleanup(tenant);
+            return -1;
+        }
     }
-    tenant->partition_count = 1;
+    tenant->partition_count = num_partitions;
     
     return 0;
 }
@@ -277,6 +318,13 @@ int bsfs_save_bat(bsfs_partition_t *partition) {
     
     partition->bat->header.timestamp = time(NULL);
     
+    // Compute and store checksum in first 32 bytes of padding
+    if (bsfs_compute_checksum(partition->bat, partition->bat->padding) != 0) {
+        printf("ERROR: Failed to compute BAT checksum\n");
+        free(encrypted_data);
+        return -1;
+    }
+
     if (bsfs_encrypt_bat(partition->bat, partition->encryption_key, encrypted_data, &encrypted_size) != 0) {
         printf("ERROR: Failed to encrypt BAT\n");
         free(encrypted_data);
@@ -285,19 +333,19 @@ int bsfs_save_bat(bsfs_partition_t *partition) {
     
     // Write encrypted BAT to blob file
     if (fseek(partition->blob_file, partition->partition_offset, SEEK_SET) != 0) {
-        printf("ERROR: Failed to seek to partition offset\n");
+        printf("ERROR: Failed to seek to partition offset %lu. Error: %s\n", partition->partition_offset, strerror(errno));
         free(encrypted_data);
         return -1;
     }
     
     if (fwrite(encrypted_data, 1, encrypted_size, partition->blob_file) != encrypted_size) {
-        printf("ERROR: Failed to write encrypted BAT\n");
+        printf("ERROR: Failed to write encrypted BAT. Error: %s\n", strerror(errno));
         free(encrypted_data);
         return -1;
     }
     
     if (fflush(partition->blob_file) != 0) {
-        printf("ERROR: Failed to flush BAT\n");
+        printf("ERROR: Failed to flush BAT. Error: %s\n", strerror(errno));
         free(encrypted_data);
         return -1;
     }
@@ -328,7 +376,21 @@ int bsfs_load_bat(bsfs_partition_t *partition) {
     
     int result = bsfs_decrypt_bat(encrypted_data, read_size, partition->encryption_key, partition->bat);
     free(encrypted_data);
-    return result;
+
+    if (result != 0) return result;
+
+    // Verify checksum
+    uint8_t calculated_checksum[32];
+    if (bsfs_compute_checksum(partition->bat, calculated_checksum) != 0) {
+        return -1;
+    }
+
+    if (memcmp(calculated_checksum, partition->bat->padding, 32) != 0) {
+        printf("ERROR: BAT checksum mismatch (corruption detected)\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 int bsfs_allocate_blocks(bsfs_partition_t *partition, uint16_t count, uint16_t *block_ids) {
@@ -382,16 +444,48 @@ static bsfs_file_entry_t* find_file_entry(bsfs_bat_t *bat, const uuid_t file_id)
 }
 
 int bsfs_write_file(bsfs_tenant_t *tenant, const uuid_t file_id, const uint8_t *data, size_t size) {
-    // For now, use only first partition
-    bsfs_partition_t *partition = &tenant->partitions[0];
-    
     // Calculate blocks needed
-    if (size > (uint64_t)BSFS_MAX_FILE_BLOCKS * partition->block_size) return -1;
-    uint32_t blocks_needed = (size + partition->block_size - 1) / partition->block_size;
+    uint32_t block_size = BSFS_BLOCK_SIZE_DEFAULT; // Default
+    if (size > (uint64_t)BSFS_MAX_FILE_BLOCKS * block_size) return -1;
+    uint32_t blocks_needed = (size + block_size - 1) / block_size;
     if (blocks_needed > BSFS_MAX_FILE_BLOCKS) return -1;
     
-    // Check if file exists (for atomic update)
-    bsfs_file_entry_t *existing_entry = find_file_entry(partition->bat, file_id);
+    bsfs_partition_t *partition = NULL;
+    bsfs_file_entry_t *existing_entry = NULL;
+
+    // 1. Search for existing file in all initialized partitions
+    for (int i = 0; i < tenant->partition_count; i++) {
+        bsfs_file_entry_t *entry = find_file_entry(tenant->partitions[i].bat, file_id);
+        if (entry) {
+            partition = &tenant->partitions[i];
+            existing_entry = entry;
+            break;
+        }
+    }
+
+    // 2. If not found, find a suitable partition for new file
+    if (!partition) {
+        for (int i = 0; i < tenant->partition_count; i++) {
+            bsfs_partition_t *p = &tenant->partitions[i];
+            if (p->bat->header.file_count < 64 &&
+                p->bat->header.free_block_count >= blocks_needed) {
+                partition = p;
+                break;
+            }
+        }
+
+        // 3. If no suitable partition, try to create a new one
+        if (!partition && tenant->partition_count < BSFS_MAX_PARTITIONS) {
+            int new_id = tenant->partition_count;
+            if (bsfs_partition_init(tenant, new_id) == 0) {
+                tenant->partition_count++;
+                partition = &tenant->partitions[new_id];
+            }
+        }
+
+        if (!partition) return -1; // No space and cannot expand
+    }
+
     uint16_t old_blocks[BSFS_MAX_FILE_BLOCKS];
     uint16_t old_block_count = 0;
     
@@ -479,11 +573,19 @@ int bsfs_write_file(bsfs_tenant_t *tenant, const uuid_t file_id, const uint8_t *
 }
 
 int bsfs_read_file(bsfs_tenant_t *tenant, const uuid_t file_id, uint8_t **data, size_t *size) {
-    // For now, use only first partition
-    bsfs_partition_t *partition = &tenant->partitions[0];
+    bsfs_partition_t *partition = NULL;
+    bsfs_file_entry_t *entry = NULL;
+
+    // Search all partitions
+    for (int i = 0; i < tenant->partition_count; i++) {
+        entry = find_file_entry(tenant->partitions[i].bat, file_id);
+        if (entry) {
+            partition = &tenant->partitions[i];
+            break;
+        }
+    }
     
-    bsfs_file_entry_t *entry = find_file_entry(partition->bat, file_id);
-    if (!entry) return -1;
+    if (!entry || !partition) return -1;
     
     // Get file size from BAT
     *size = entry->file_size;
@@ -523,11 +625,19 @@ int bsfs_read_file(bsfs_tenant_t *tenant, const uuid_t file_id, uint8_t **data, 
 }
 
 int bsfs_delete_file(bsfs_tenant_t *tenant, const uuid_t file_id) {
-    // For now, use only first partition
-    bsfs_partition_t *partition = &tenant->partitions[0];
+    bsfs_partition_t *partition = NULL;
+    bsfs_file_entry_t *entry = NULL;
+
+    // Search all partitions
+    for (int i = 0; i < tenant->partition_count; i++) {
+        entry = find_file_entry(tenant->partitions[i].bat, file_id);
+        if (entry) {
+            partition = &tenant->partitions[i];
+            break;
+        }
+    }
     
-    bsfs_file_entry_t *entry = find_file_entry(partition->bat, file_id);
-    if (!entry) return -1;
+    if (!entry || !partition) return -1;
     
     // Collect blocks to free
     uint16_t blocks_to_free[BSFS_MAX_FILE_BLOCKS];
