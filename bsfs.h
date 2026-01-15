@@ -9,6 +9,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/kdf.h>
+#include <openssl/crypto.h>
 
 #define BSFS_BLOCK_SIZE_DEFAULT (2 * 1024 * 1024)  // 2MB
 #define BSFS_BLOCKS_PER_PARTITION 1024
