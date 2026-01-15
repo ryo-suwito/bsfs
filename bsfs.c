@@ -101,7 +101,8 @@ int bsfs_encrypt_bat(const bsfs_bat_t *bat, const uint8_t *key, uint8_t *encrypt
 }
 
 int bsfs_decrypt_bat(const uint8_t *encrypted_data, size_t encrypted_size, const uint8_t *key, bsfs_bat_t *bat) {
-    if (encrypted_size < BSFS_AES_IV_SIZE) return -1;
+    if (encrypted_size < BSFS_AES_IV_SIZE + sizeof(bsfs_bat_t) ||
+        encrypted_size > BSFS_AES_IV_SIZE + sizeof(bsfs_bat_t) + 16) return -1;
     
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return -1;
@@ -258,7 +259,7 @@ void bsfs_tenant_cleanup(bsfs_tenant_t *tenant) {
     if (tenant->blob_path) {
         free(tenant->blob_path);
     }
-    memset(tenant, 0, sizeof(bsfs_tenant_t));
+    OPENSSL_cleanse(tenant, sizeof(bsfs_tenant_t));
 }
 
 int bsfs_save_bat(bsfs_partition_t *partition) {
@@ -385,6 +386,7 @@ int bsfs_write_file(bsfs_tenant_t *tenant, const uuid_t file_id, const uint8_t *
     bsfs_partition_t *partition = &tenant->partitions[0];
     
     // Calculate blocks needed
+    if (size > (uint64_t)BSFS_MAX_FILE_BLOCKS * partition->block_size) return -1;
     uint32_t blocks_needed = (size + partition->block_size - 1) / partition->block_size;
     if (blocks_needed > BSFS_MAX_FILE_BLOCKS) return -1;
     
@@ -485,6 +487,11 @@ int bsfs_read_file(bsfs_tenant_t *tenant, const uuid_t file_id, uint8_t **data, 
     
     // Get file size from BAT
     *size = entry->file_size;
+
+    // Validate file size against block count
+    uint64_t max_size = (uint64_t)entry->block_count * partition->block_size;
+    if (entry->file_size > max_size) return -1;
+
     uint64_t blocks_offset = partition->partition_offset + sizeof(bsfs_bat_t) + 4096;
     
     // Allocate memory for file

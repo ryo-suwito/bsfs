@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c2x -g -O0
-LDFLAGS = -lssl -lcrypto -luuid
+CFLAGS = -Wall -Wextra -Wpedantic -std=c2x -g -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE
+LDFLAGS = -lssl -lcrypto -luuid -pie -Wl,-z,relro,-z,now
 
 SRCDIR = .
 SOURCES = bsfs.c
